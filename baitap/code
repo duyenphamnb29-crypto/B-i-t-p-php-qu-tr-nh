@@ -1,0 +1,650 @@
+<?php
+session_start();
+$error = $_GET['error'] ?? '';
+$success = $_GET['success'] ?? '';
+$is_logged_in = isset($_SESSION['user_id']);
+$current_user_id = $_SESSION['user_id'] ?? null;
+$current_username = $_SESSION['username'] ?? null;
+$current_view = $_GET['view'] ?? ($is_logged_in ? 'dashboard' : 'login');
+
+// Cấu hình CSDL 
+$db_host = 'localhost';
+$db_name = 'duynphm_todo_app';
+$db_user = 'root';
+$db_pass = '';
+$charset = 'utf8mb4';
+
+$dsn = "mysql:host=$db_host;dbname=$db_name;charset=$charset";
+$options = [
+    PDO::ATTR_ERRMODE               => PDO::ERRMODE_EXCEPTION,
+    PDO::ATTR_DEFAULT_FETCH_MODE    => PDO::FETCH_ASSOC,
+    PDO::ATTR_EMULATE_PREPARES      => false,
+];
+
+try {
+     $pdo = new PDO($dsn, $db_user, $db_pass, $options);
+} catch (\PDOException $e) {
+     $error = "Lỗi kết nối CSDL: " . $e->getMessage();
+     $current_view = 'error';
+}
+
+// Trợ giúp: chuyển empty -> NULL
+function empty_to_null($value) {
+	$trimmed_value = trim((string)$value);
+   return ($trimmed_value === '' || $trimmed_value === null) ? NULL : $value;
+}
+
+// Nếu không gặp lỗi kết nối, xử lý logic
+if ($current_view !== 'error') {
+
+    // --- Đăng xuất ---
+    if ($current_view === 'logout') {
+        // đảm bảo logout luôn xảy ra trước khi gửi output
+        session_unset();
+        session_destroy();
+        // xóa cookie phiên (nếu cần)
+        if (ini_get("session.use_cookies")) {
+            $params = session_get_cookie_params();
+            setcookie(session_name(), '', time() - 42000,
+                $params["path"], $params["domain"],
+                $params["secure"], $params["httponly"]
+            );
+        }
+        header('Location: ?view=login&success=' . urlencode('Bạn đã đăng xuất thành công.'));
+        exit();
+    }
+
+    // --- Đăng ký (POST) ---
+    if ($current_view === 'register_post' && $_SERVER['REQUEST_METHOD'] === 'POST') {
+        $username = trim($_POST['username'] ?? '');
+        $password = $_POST['password'] ?? '';
+        $email = empty_to_null(trim($_POST['email'] ?? NULL));
+
+        if (empty($username) || empty($password)) {
+            $error = "Tên đăng nhập và mật khẩu không được để trống.";
+            $current_view = 'register';
+        } else {
+            $hashed_password = password_hash($password, PASSWORD_DEFAULT);
+            try {
+                $stmt = $pdo->prepare("INSERT INTO users (username, password, email) VALUES (?, ?, ?)");
+                $stmt->execute([$username, $hashed_password, $email]);
+                header('Location: ?view=login&success=' . urlencode('Đăng ký thành công! Vui lòng đăng nhập.'));
+                exit();
+            } catch (\PDOException $e) {
+                // duplicate key thường trả về SQLSTATE 23000
+                if ($e->getCode() == 23000) {
+                    $error = "Tên đăng nhập hoặc Email đã tồn tại.";
+                } else {
+                    $error = "Lỗi CSDL: " . $e->getMessage();
+                }
+                $current_view = 'register';
+            }
+        }
+    }
+
+    // --- Đăng nhập (POST) ---
+    if ($current_view === 'login_post' && $_SERVER['REQUEST_METHOD'] === 'POST') {
+        $username = trim($_POST['username'] ?? '');
+        $password = $_POST['password'] ?? '';
+
+        try {
+            $stmt = $pdo->prepare("SELECT id, username, password FROM users WHERE username = ?");
+            $stmt->execute([$username]);
+            $user = $stmt->fetch();
+
+            if ($user) {
+                if (password_verify($password, $user['password'])) {
+                    // set session
+                    $_SESSION['user_id'] = $user['id'];
+                    $_SESSION['username'] = $user['username'];
+                    header('Location: ?view=dashboard');
+                    exit();
+                } else {
+                    $error = "Mật khẩu không đúng.";
+                }
+            } else {
+                $error = "Tên đăng nhập không tồn tại.";
+            }
+        } catch (\PDOException $e) {
+            $error = "Lỗi CSDL: " . $e->getMessage();
+        }
+        $current_view = 'login';
+    }
+
+    // Kiểm tra truy cập: chỉ cho phép thao tác khi đã đăng nhập
+    if (in_array($current_view, ['dashboard', 'create_post', 'update_post', 'delete_task', 'toggle_status'])) {
+        if (!$is_logged_in) {
+            header('Location: ?view=login&error=' . urlencode('Vui lòng đăng nhập để quản lý công việc.'));
+            exit();
+        }
+    }
+
+    // --- Tạo công việc (POST) ---
+    if ($current_view === 'create_post' && $_SERVER['REQUEST_METHOD'] === 'POST') {
+        // bảo đảm user id là số nguyên
+        $current_user_id = (int)$current_user_id;
+        $title = trim($_POST['title'] ?? '');
+        $description = empty_to_null(trim($_POST['description'] ?? NULL));
+        $due_date = empty_to_null($_POST['due_date'] ?? NULL);
+
+        if (empty($title)) {
+            header('Location: ?view=dashboard&error=' . urlencode('Tiêu đề không được để trống.'));
+            exit();
+        }
+
+        try {
+            $sql = "INSERT INTO tasks (user_id, title, description, due_date, status, created_at) VALUES (?, ?, ?, ?, 'pending', NOW())";
+            $stmt = $pdo->prepare($sql);
+            $stmt->execute([$current_user_id, $title, $description, $due_date]);
+            header('Location: ?view=dashboard&success=' . urlencode('Thêm công việc thành công!'));
+            exit();
+        } catch (\PDOException $e) {
+            header('Location: ?view=dashboard&error=' . urlencode("Lỗi khi thêm: " . $e->getMessage()));
+            exit();
+        }
+    }
+
+    // --- Xóa công việc (GET id) ---
+    if ($current_view === 'delete_task' && isset($_GET['id'])) {
+        $current_user_id = (int)$current_user_id;
+        $task_id = (int)$_GET['id'];
+        try {
+            $stmt = $pdo->prepare("DELETE FROM tasks WHERE id = ? AND user_id = ?");
+            $stmt->execute([$task_id, $current_user_id]);
+            if ($stmt->rowCount() > 0) {
+                header('Location: ?view=dashboard&success=' . urlencode('Xóa công việc thành công.'));
+            } else {
+                header('Location: ?view=dashboard&error=' . urlencode('Không tìm thấy công việc hoặc không có quyền xóa.'));
+            }
+            exit();
+        } catch (\PDOException $e) {
+            header('Location: ?view=dashboard&error=' . urlencode("Lỗi khi xóa: " . $e->getMessage()));
+            exit();
+        }
+    }
+
+    // --- Đổi trạng thái (toggle) ---
+    if ($current_view === 'toggle_status' && isset($_GET['id'])) {
+        $current_user_id = (int)$current_user_id;
+        $task_id = (int)$_GET['id'];
+
+        try {
+            $stmt = $pdo->prepare("SELECT status FROM tasks WHERE id = ? AND user_id = ?");
+            $stmt->execute([$task_id, $current_user_id]);
+            $task = $stmt->fetch();
+
+            if ($task) {
+                $new_status = ($task['status'] === 'completed') ? 'pending' : 'completed';
+                if ($task['status'] === 'in_progress') {
+                    $new_status = 'completed';
+                }
+
+                $stmt = $pdo->prepare("UPDATE tasks SET status = ? WHERE id = ? AND user_id = ?");
+                $stmt->execute([$new_status, $task_id, $current_user_id]);
+                header('Location: ?view=dashboard&success=' . urlencode('Cập nhật trạng thái thành công.'));
+                exit();
+            } else {
+                header('Location: ?view=dashboard&error=' . urlencode('Không tìm thấy công việc hoặc không có quyền truy cập.'));
+                exit();
+            }
+        } catch (\PDOException $e) {
+            header('Location: ?view=dashboard&error=' . urlencode("Lỗi khi cập nhật trạng thái: " . $e->getMessage()));
+            exit();
+        }
+    }
+
+    // --- Cập nhật công việc (POST) ---
+    if ($current_view === 'update_post' && $_SERVER['REQUEST_METHOD'] === 'POST' && isset($_GET['id'])) {
+        $current_user_id = (int)$current_user_id;
+        $task_id = (int)$_GET['id'];
+
+        // Lấy dữ liệu từ form
+        $title = trim($_POST['title'] ?? '');
+        $description = empty_to_null(trim($_POST['description'] ?? NULL));
+        $due_date = empty_to_null($_POST['due_date'] ?? NULL);
+        $status = $_POST['status'] ?? 'pending';
+
+        // Validate
+        if (empty($title)) {
+            header('Location: ?view=dashboard&error=' . urlencode('Tiêu đề không được để trống.'));
+            exit();
+        }
+
+        try {
+            $sql = "UPDATE tasks SET title = ?, description = ?, due_date = ?, status = ? WHERE id = ? AND user_id = ?";
+            $stmt = $pdo->prepare($sql);
+            $stmt->execute([$title, $description, $due_date, $status, $task_id, $current_user_id]);
+
+            if ($stmt->rowCount() === 0) {
+                 header('Location: ?view=dashboard&error=' . urlencode('Cập nhật không thành công. Có thể công việc không tồn tại hoặc bạn không có quyền.'));
+                 exit();
+            }
+
+            header('Location: ?view=dashboard&success=' . urlencode('Chỉnh sửa công việc thành công!'));
+            exit();
+        } catch (\PDOException $e) {
+            header('Location: ?view=dashboard&error=' . urlencode("Lỗi khi cập nhật: " . $e->getMessage()));
+            exit();
+        }
+    }
+
+    // --- Lấy danh sách công việc để hiển thị (Dashboard) ---
+    $tasks = [];
+    $filter_status = $_GET['status'] ?? '';
+    $sort_by = $_GET['sort'] ?? 'due_date';
+
+    if ($current_view === 'dashboard') {
+        $sql = "SELECT id, title, description, due_date, status, created_at FROM tasks WHERE user_id = ?";
+        $params = [$current_user_id];
+
+        if (!empty($filter_status) && in_array($filter_status, ['pending', 'in_progress', 'completed'])) {
+            $sql .= " AND status = ?";
+            $params[] = $filter_status;
+        }
+
+        if ($sort_by === 'created_at') {
+            $sql .= " ORDER BY created_at DESC";
+        } else {
+            // ưu tiên các công việc chưa hoàn thành lên trước, null due_date xuống dưới
+            $sql .= " ORDER BY FIELD(status, 'pending', 'in_progress', 'completed'), (due_date IS NULL) ASC, due_date ASC";
+        }
+
+        try {
+            $stmt = $pdo->prepare($sql);
+            $stmt->execute($params);
+            $tasks = $stmt->fetchAll();
+        } catch (\PDOException $e) {
+            $error = "Lỗi khi tải công việc: " . $e->getMessage();
+            $tasks = [];
+        }
+    }
+}
+?>
+<!DOCTYPE html>
+<html lang="vi">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Sleek To-Do List - PHP</title>
+    <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/css/bootstrap.min.css" rel="stylesheet">
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.0.0-beta3/css/all.min.css">
+
+    <style>
+        /* ======================================= */
+        /* CSS: Giao diện Sáng (Sleek Light Mode) */
+        /* ======================================= */
+        :root {
+            --primary-blue: #007bff;
+            --success-green: #28a745;
+            --warning-yellow: #ffc107;
+            --info-cyan: #17a2b8;
+            --bg-light: #f0f2f5;
+            --card-light: #ffffff;
+            --text-dark: #343a40;
+            --border-grey: #e9ecef;
+        }
+        body {
+            background-color: var(--bg-light);
+            color: var(--text-dark);
+            font-family: 'Segoe UI', 'Roboto', 'Helvetica Neue', Arial, sans-serif;
+        }
+        .container { max-width: 1000px; }
+
+        header h1 {
+            font-weight: 800;
+            color: var(--primary-blue);
+            text-align: center;
+            padding-bottom: 15px;
+            border-bottom: 2px solid var(--border-grey);
+        }
+
+        .card {
+            background-color: var(--card-light);
+            border: 1px solid var(--border-grey);
+            border-radius: 12px;
+            box-shadow: 0 4px 12px rgba(0, 0, 0, 0.05);
+        }
+        .card-header, .modal-header {
+            border-radius: 12px 12px 0 0 !important;
+        }
+
+        .task-item {
+            padding: 18px;
+            margin-bottom: 12px;
+            background-color: var(--card-light);
+            border-radius: 10px;
+            border-left: 5px solid var(--primary-blue);
+            transition: all 0.3s ease;
+            box-shadow: 0 2px 5px rgba(0, 0, 0, 0.05);
+        }
+        .task-item:hover {
+            box-shadow: 0 6px 15px rgba(0, 0, 0, 0.1);
+            transform: translateY(-2px);
+        }
+        .task-item.completed {
+            border-left-color: var(--success-green);
+            opacity: 0.8;
+            background-color: #f8f9fa;
+        }
+
+        .task-title {
+            font-weight: 600;
+            color: var(--text-dark);
+            font-size: 1.15rem;
+        }
+        .task-meta {
+            font-size: 0.85rem;
+            color: #6c757d;
+        }
+        .action-btn {
+            width: 38px;
+            height: 38px;
+            padding: 0;
+            font-size: 16px;
+            line-height: 1;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            border-radius: 8px;
+        }
+
+        .btn-brand-primary {
+            background-color: #6f42c1;
+            border-color: #6f42c1;
+            color: white;
+        }
+        .btn-brand-primary:hover {
+            background-color: #59359e;
+            border-color: #59359e;
+        }
+        /* thêm class cho modal header (trước dùng bg-brand-primary nhưng chưa có) */
+        .bg-brand-primary {
+            background-color: #6f42c1 !important;
+            color: #fff;
+        }
+    </style>
+</head>
+<body>
+    <div class="container py-5">
+        <header class="mb-5">
+            <h1>📋 Ứng dụng Quản lý Công việc Cá nhân</h1>
+        </header>
+
+        <?php if ($error): ?>
+            <div class="alert alert-danger d-flex align-items-center"><i class="fas fa-exclamation-triangle me-2"></i><?= htmlspecialchars($error) ?></div>
+        <?php endif; ?>
+        <?php if ($success): ?>
+            <div class="alert alert-success d-flex align-items-center"><i class="fas fa-check-circle me-2"></i><?= htmlspecialchars($success) ?></div>
+        <?php endif; ?>
+
+        <?php if ($current_view === 'login' || $current_view === 'login_post'): ?>
+
+        <div class="card border-0 mx-auto" style="max-width: 420px;">
+            <div class="card-header bg-primary text-white text-center h5">Đăng nhập tài khoản</div>
+            <div class="card-body p-4">
+                <form action="?view=login_post" method="POST">
+                    <div class="mb-3">
+                        <label for="login_username" class="form-label fw-bold"><i class="fas fa-user me-1"></i> Tên đăng nhập</label>
+                        <input type="text" class="form-control" id="login_username" name="username" required>
+                    </div>
+                    <div class="mb-4">
+                        <label for="login_password" class="form-label fw-bold"><i class="fas fa-lock me-1"></i> Mật khẩu</label>
+                        <input type="password" class="form-control" id="login_password" name="password" required>
+                    </div>
+                    <button type="submit" class="btn btn-primary w-100 btn-lg"><i class="fas fa-sign-in-alt me-2"></i>Đăng nhập</button>
+                </form>
+                <p class="mt-4 text-center">
+                    Bạn chưa có tài khoản? <a href="?view=register" class="text-success fw-bold">Đăng ký ngay!</a>
+                </p>
+            </div>
+        </div>
+
+        <?php elseif ($current_view === 'register' || $current_view === 'register_post'): ?>
+
+        <div class="card border-0 mx-auto" style="max-width: 420px;">
+            <div class="card-header bg-success text-white text-center h5">Tạo tài khoản mới</div>
+            <div class="card-body p-4">
+                <form action="?view=register_post" method="POST">
+                    <div class="mb-3">
+                        <label for="reg_username" class="form-label fw-bold"><i class="fas fa-user-circle me-1"></i> Tên đăng nhập (*)</label>
+                        <input type="text" class="form-control" id="reg_username" name="username" required>
+                    </div>
+                    <div class="mb-3">
+                        <label for="reg_password" class="form-label fw-bold"><i class="fas fa-key me-1"></i> Mật khẩu (*)</label>
+                        <input type="password" class="form-control" id="reg_password" name="password" required>
+                    </div>
+                    <div class="mb-4">
+                        <label for="reg_email" class="form-label fw-bold"><i class="fas fa-envelope me-1"></i> Email (Tùy chọn)</label>
+                        <input type="email" class="form-control" id="reg_email" name="email">
+                    </div>
+                    <button type="submit" class="btn btn-success w-100 btn-lg"><i class="fas fa-user-plus me-2"></i>Đăng ký</button>
+                </form>
+                <p class="mt-4 text-center">
+                    Bạn đã có tài khoản? <a href="?view=login" class="text-primary fw-bold">Đăng nhập</a>
+                </p>
+            </div>
+        </div>
+
+        <?php elseif ($current_view === 'dashboard'): ?>
+
+        <div class="d-flex justify-content-between align-items-center mb-4 p-3 bg-white rounded shadow-sm">
+            <h4 class="mb-0 text-dark"><i class="fas fa-smile-beam text-warning me-2"></i>Xin chào, <span class="text-primary fw-bold"><?= htmlspecialchars($current_username) ?></span>!</h4>
+            <a href="?view=logout" class="btn btn-outline-danger btn-sm action-btn" title="Đăng xuất">
+                <i class="fas fa-sign-out-alt"></i>
+            </a>
+        </div>
+
+        <div class="card mb-4 border-0">
+            <div class="card-body">
+                <button class="btn btn-brand-primary mb-3 me-3" data-bs-toggle="modal" data-bs-target="#createTaskModal">
+                    <i class="fas fa-calendar-plus me-1"></i> Thêm Công Việc Mới
+                </button>
+
+                <div class="row align-items-center">
+                    <div class="col-lg-7 col-md-12 mb-3 mb-lg-0">
+                        <span class="fw-bold me-2 text-secondary"><i class="fas fa-filter me-1"></i> Lọc theo Trạng thái:</span>
+                        <?php
+                            $build_url = function($status = '', $sort = '') use ($sort_by, $filter_status) {
+                                $query_params = ['view' => 'dashboard'];
+                                $query_params['sort'] = empty($sort) ? $sort_by : $sort;
+                                if (!empty($status)) {
+                                    $query_params['status'] = $status;
+                                }
+                                return '?' . http_build_query($query_params);
+                            };
+                        ?>
+
+                        <a href="<?= $build_url() ?>" class="btn btn-sm <?= empty($filter_status) ? 'btn-dark' : 'btn-outline-secondary' ?>">Tất cả</a>
+                        <a href="<?= $build_url('pending') ?>" class="btn btn-sm <?= $filter_status === 'pending' ? 'btn-warning' : 'btn-outline-warning' ?>">Chờ</a>
+                        <a href="<?= $build_url('in_progress') ?>" class="btn btn-sm <?= $filter_status === 'in_progress' ? 'btn-info' : 'btn-outline-info' ?>">Đang làm</a>
+                        <a href="<?= $build_url('completed') ?>" class="btn btn-sm <?= $filter_status === 'completed' ? 'btn-success' : 'btn-outline-success' ?>">Xong</a>
+                    </div>
+
+                    <div class="col-lg-5 col-md-12 text-lg-end">
+                        <span class="fw-bold me-2 text-secondary"><i class="fas fa-sort me-1"></i> Sắp xếp theo:</span>
+                        <a href="<?= $build_url($filter_status, 'due_date') ?>" class="btn btn-sm <?= $sort_by === 'due_date' ? 'btn-secondary' : 'btn-outline-secondary' ?>">Ngày Hạn</a>
+                        <a href="<?= $build_url($filter_status, 'created_at') ?>" class="btn btn-sm <?= $sort_by === 'created_at' ? 'btn-secondary' : 'btn-outline-secondary' ?>">Ngày Tạo</a>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <h3 class="mb-3 text-dark"><i class="fas fa-list-check me-2 text-primary"></i>Danh sách Công việc (<?= count($tasks) ?>)</h3>
+
+        <?php if (empty($tasks)): ?>
+            <div class="alert alert-info text-center shadow-sm">
+                <i class="fas fa-check-double me-2"></i>Tuyệt vời! Bạn không có công việc nào cần làm, hoặc không có công việc nào khớp với bộ lọc.
+            </div>
+        <?php else: ?>
+            <div class="task-list">
+                <?php foreach ($tasks as $task): ?>
+                    <div class="task-item <?= $task['status'] === 'completed' ? 'completed' : '' ?>">
+                        <div class="row align-items-center">
+                            <div class="col-md-7 col-sm-12">
+                                <span class="task-title"><?= htmlspecialchars($task['title']) ?></span>
+                                <?php if (!empty($task['description'])): ?>
+                                    <p class="mb-0 task-meta fst-italic mt-1"><i class="fas fa-info-circle me-1"></i><?= htmlspecialchars($task['description']) ?></p>
+                                <?php endif; ?>
+                            </div>
+
+                            <div class="col-md-2 col-sm-6 text-md-center mt-2 mt-md-0">
+                                <div class="task-meta">
+                                    <i class="far fa-calendar-alt me-1 text-primary"></i> Hạn:
+                                    <span class="fw-bold text-dark"><?= $task['due_date'] ?? '[Không có]' ?></span>
+                                </div>
+                            </div>
+
+                            <div class="col-md-3 col-sm-6 text-md-end text-start mt-2 mt-md-0">
+                                <div class="d-flex justify-content-md-end justify-content-between align-items-center gap-2">
+                                    <?php
+                                        $badge_class = 'bg-secondary';
+                                        $status_text = 'Unknown';
+                                        if ($task['status'] === 'completed') { $badge_class = 'bg-success'; $status_text = '✅ Hoàn thành'; }
+                                        elseif ($task['status'] === 'in_progress') { $badge_class = 'bg-info'; $status_text = '🔨 Đang làm'; }
+                                        else { $badge_class = 'bg-warning text-dark'; $status_text = '⏳ Đang chờ'; }
+                                    ?>
+                                    <span class="badge <?= $badge_class ?>"><?= $status_text ?></span>
+
+                                    <a href="?view=toggle_status&id=<?= (int)$task['id'] ?>" class="btn action-btn <?= $task['status'] === 'completed' ? 'btn-success' : 'btn-outline-success' ?>" title="Đổi trạng thái">
+                                        <i class="fas <?= $task['status'] === 'completed' ? 'fa-check' : 'fa-hourglass-start' ?>"></i>
+                                    </a>
+
+                                    <button class="btn action-btn btn-info text-white"
+                                        data-bs-toggle="modal"
+                                        data-bs-target="#editTaskModal"
+                                        data-id="<?= (int)$task['id'] ?>"
+                                        data-title="<?= htmlspecialchars($task['title'], ENT_QUOTES) ?>"
+                                        data-desc="<?= htmlspecialchars($task['description'] ?? '', ENT_QUOTES) ?>"
+                                        data-due="<?= htmlspecialchars($task['due_date'] ?? '', ENT_QUOTES) ?>"
+                                        data-status="<?= htmlspecialchars($task['status'], ENT_QUOTES) ?>"
+                                        title="Chỉnh sửa"
+                                    >
+                                        <i class="fas fa-edit"></i>
+                                    </button>
+
+                                    <a href="?view=delete_task&id=<?= (int)$task['id'] ?>"
+                                        onclick="return confirm('Bạn chắc chắn muốn xóa công việc này?')"
+                                        class="btn action-btn btn-danger"
+                                        title="Xóa"
+                                    >
+                                        <i class="fas fa-trash-alt"></i>
+                                    </a>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+                <?php endforeach; ?>
+            </div>
+        <?php endif; ?>
+
+        <!-- Modal Thêm -->
+        <div class="modal fade" id="createTaskModal" tabindex="-1" aria-labelledby="createTaskModalLabel" aria-hidden="true">
+            <div class="modal-dialog">
+                <div class="modal-content">
+                    <div class="modal-header bg-brand-primary text-white">
+                        <h5 class="modal-title" id="createTaskModalLabel"><i class="fas fa-plus-square me-2"></i>Tạo Công Việc Mới</h5>
+                        <button type="button" class="btn-close btn-close-white" data-bs-dismiss="modal" aria-label="Close"></button>
+                    </div>
+                    <form action="?view=create_post" method="POST">
+                        <div class="modal-body">
+                            <div class="mb-3">
+                                <label for="task_title" class="form-label fw-bold">Tiêu đề (*)</label>
+                                <input type="text" class="form-control" id="task_title" name="title" required>
+                            </div>
+                            <div class="mb-3">
+                                <label for="task_desc" class="form-label fw-bold">Mô tả (Tùy chọn)</label>
+                                <textarea class="form-control" id="task_desc" name="description" rows="3"></textarea>
+                            </div>
+                            <div class="mb-3">
+                                <label for="task_due" class="form-label fw-bold">Ngày hết hạn (Tùy chọn)</label>
+                                <input type="date" class="form-control" id="task_due" name="due_date">
+                            </div>
+                        </div>
+                        <div class="modal-footer">
+                            <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">Hủy</button>
+                            <button type="submit" class="btn btn-brand-primary"><i class="fas fa-save me-1"></i>Lưu lại</button>
+                        </div>
+                    </form>
+                </div>
+            </div>
+        </div>
+
+        <!-- Modal Chỉnh sửa -->
+        <div class="modal fade" id="editTaskModal" tabindex="-1" aria-labelledby="editTaskModalLabel" aria-hidden="true">
+            <div class="modal-dialog">
+                <div class="modal-content">
+                    <div class="modal-header bg-info text-white">
+                        <h5 class="modal-title" id="editTaskModalLabel"><i class="fas fa-pen-to-square me-2"></i>Chỉnh sửa công việc</h5>
+                        <button type="button" class="btn-close btn-close-white" data-bs-dismiss="modal" aria-label="Close"></button>
+                    </div>
+                    <form action="?view=update_post" method="POST">
+                        <div class="modal-body">
+                            <div class="mb-3">
+                                <label for="edit_task_title" class="form-label fw-bold">Tiêu đề (*)</label>
+                                <input type="text" class="form-control" id="edit_task_title" name="title" required>
+                            </div>
+                            <div class="mb-3">
+                                <label for="edit_task_desc" class="form-label fw-bold">Mô tả (Tùy chọn)</label>
+                                <textarea class="form-control" id="edit_task_desc" name="description" rows="3"></textarea>
+                            </div>
+                            <div class="mb-3">
+                                <label for="edit_task_due" class="form-label fw-bold">Ngày hết hạn (Tùy chọn)</label>
+                                <input type="date" class="form-control" id="edit_task_due" name="due_date">
+                            </div>
+                            <div class="mb-3">
+                                <label for="edit_task_status" class="form-label fw-bold">Trạng thái (*)</label>
+                                <select class="form-control" id="edit_task_status" name="status" required>
+                                    <option value="pending">⏳ Đang chờ</option>
+                                    <option value="in_progress">🔨 Đang làm</option>
+                                    <option value="completed">✅ Hoàn thành</option>
+                                </select>
+                            </div>
+                        </div>
+                        <div class="modal-footer">
+                            <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">Hủy</button>
+                            <button type="submit" class="btn btn-info text-white"><i class="fas fa-upload me-1"></i>Cập nhật</button>
+                        </div>
+                    </form>
+                </div>
+            </div>
+        </div>
+
+        <?php endif; // end dashboard ?>
+
+    </div>
+
+    <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/js/bootstrap.bundle.min.js"></script>
+
+    <script>
+        document.addEventListener('DOMContentLoaded', function() {
+            var editTaskModal = document.getElementById('editTaskModal');
+            if (editTaskModal) {
+                editTaskModal.addEventListener('show.bs.modal', function (event) {
+                    var button = event.relatedTarget;
+                    if (!button) return;
+                    var taskId = button.getAttribute('data-id');
+                    var taskTitle = button.getAttribute('data-title') || '';
+                    var taskDesc = button.getAttribute('data-desc') || '';
+                    var taskDue = button.getAttribute('data-due') || '';
+                    var taskStatus = button.getAttribute('data-status') || 'pending';
+
+                    var modalTitle = editTaskModal.querySelector('.modal-title');
+                    var modalForm = editTaskModal.querySelector('form');
+                    var modalInputTitle = editTaskModal.querySelector('#edit_task_title');
+                    var modalInputDesc = editTaskModal.querySelector('#edit_task_desc');
+                    var modalInputDue = editTaskModal.querySelector('#edit_task_due');
+                    var modalSelectStatus = editTaskModal.querySelector('#edit_task_status');
+
+                    modalTitle.textContent = 'Chỉnh sửa công việc ID: ' + taskId;
+                    modalForm.action = '?view=update_post&id=' + encodeURIComponent(taskId);
+                    modalInputTitle.value = taskTitle;
+                    modalInputDesc.value = taskDesc;
+                    modalInputDue.value = taskDue;
+                    modalSelectStatus.value = taskStatus;
+                });
+            }
+        });
+    </script>
+
+</body>
+</html>
