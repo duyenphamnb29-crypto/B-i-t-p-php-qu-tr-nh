@@ -1,54 +1,51 @@
 <?php
 /*
-  Cookies
-  kích thước bé: 4KB
-  lưu thông tin người dùng, trải nghiệm người dùng trên website
-  Đặc điểm
-  được lưu trên máy tính cá nhân người udngf bởi trình duyệt
-  cấu trúc: cặp [key=>value] + thời gian cookies hết hạn, tên miền,...
-  mục đích:
-  - quản lý session_cache_expire- quản lý đăng nhập
-  - theo dõi thông tin trải nghiệm người dùng
-  hoạt động của cookies
-  - quản lý cookies: set cookies([key=>value]): lưu cookies trên máy
-  - lấy gía trị cookies: $_COOKIE
-  - cú pháp đầy đủ
-  //////setcookie(name, value, expires, path, domain, secure, httponly);
-  */
-  
-  
-  //Cách viết hiện đại
-    setcookie('username', 'Nguyễn Văn A',
-	[
-	         'expires' => time() + 3600, //có giá trị trong 1h
-	         'path' => "/Myweb",
-	         'secure' => true,
-	         'httponly' => true,
-	]);
-	
-	if(isset($_COOKIE['username']))
-	 {
-		 echo "Xin chào bạn" . htmlspecialchars($_COOKIE['username']);
-	 }
-	 else{
-		 echo "Không có cookies!";
-  
-//setcookie('username', 'Nguyễn Văn A', time() + 3600, "/Mywweb");   //có giá trị trong 1h
-	 
-	/* if(isset($_COOKIE['username']))
-	 {
-		 echo "Xin chào bạn" . htmlspecialchars($_COOKIE['username']);
-	 }
-	 else{
-		 echo "Không có cookies!";
-	 }*/
-	 
-//Hủy cookies
-     setcookie('username', 'Nguyễn Văn A', time() - 3600, "/Mywweb");   //có giá trị trong 1h
-	 if(isset($_COOKIE['username']))
-	 {
-		 echo "Xin chào bạn" . htmlspecialchars($_COOKIE['username']);
-	 }
-	 else{
-		 echo "Không có cookies!";
-	 }
+    COOKIES
+    - Dung lượng nhỏ (khoảng 4KB)
+    - Dùng để lưu thông tin người dùng, cải thiện trải nghiệm website
+
+    Đặc điểm:
+    - Được lưu trên máy tính cá nhân của người dùng thông qua trình duyệt
+    - Có dạng cặp key => value kèm thời gian hết hạn, đường dẫn, tên miền,...
+
+    Mục đích:
+    - Quản lý đăng nhập (session)
+    - Theo dõi và ghi nhớ trải nghiệm người dùng
+
+    Hoạt động của cookie:
+    - Tạo cookie: setcookie()
+    - Lấy cookie: $_COOKIE
+    - Cú pháp đầy đủ:
+      setcookie(name, value, expires, path, domain, secure, httponly);
+*/
+
+// ================== TẠO COOKIE (CÁCH VIẾT HIỆN ĐẠI) ==================
+setcookie(
+    'username',
+    'Nguyễn Văn A',
+    [
+        'expires'  => time() + 3600, // thời gian tồn tại 1 giờ
+        'path'     => '/Myweb',
+        'secure'   => true,
+        'httponly' => true
+    ]
+);
+
+// ================== KIỂM TRA & LẤY COOKIE ==================
+if (isset($_COOKIE['username'])) {
+    echo "Xin chào bạn " . htmlspecialchars($_COOKIE['username']);
+} else {
+    echo "Không có cookies!";
+}
+
+// ================== HỦY COOKIE ==================
+setcookie('username', 'Nguyễn Văn A', time() - 3600, '/Myweb');
+
+// Kiểm tra lại sau khi hủy
+if (isset($_COOKIE['username'])) {
+    echo "Xin chào bạn " . htmlspecialchars($_COOKIE['username']);
+} else {
+    echo "Không có cookies!";
+}
+?>
+
